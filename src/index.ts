@@ -20,10 +20,11 @@ interface MemvidInstance {
     metadata?: Record<string, unknown>;
     labels?: string[];
     enableEmbedding?: boolean;
+    embeddingModel?: string;
   }) => Promise<void>;
   find: (
     query: string | undefined,
-    options?: { k?: number; mode?: "auto" | "lex" | "sem" }
+    options?: { k?: number; mode?: "auto" | "lex" | "sem"; embedder?: unknown }
   ) => Promise<SearchResult[] | { hits: SearchResult[] }>;
   timeline?: (options?: { k?: number }) => Promise<SearchResult[]>;
 }
@@ -38,19 +39,79 @@ interface SearchResult {
   metadata?: Record<string, unknown>;
 }
 
-// Configuration - XDG compliant
+// =============================================================================
+// Embedding Configuration
+// =============================================================================
+
+// Supported embedding models
+const EMBEDDING_MODELS = {
+  // Local models (no API key required, Linux/macOS only)
+  local: ["bge-small", "bge-base", "nomic", "gte-large"],
+  // OpenAI models (requires OPENAI_API_KEY)
+  openai: ["openai-small", "openai-large"],
+  // Ollama models (requires OLLAMA_HOST or OPENAI_BASE_URL pointing to Ollama)
+  ollama: ["ollama"],
+} as const;
+
+// Environment variables
+const OLLAMA_HOST = process.env.OLLAMA_HOST || process.env.OLLAMA_BASE_URL;
+const DEFAULT_EMBEDDING_MODEL = process.env.MEMVID_EMBEDDING_MODEL || "bge-small";
+
+// Configure Ollama as OpenAI-compatible endpoint if OLLAMA_HOST is set
+function configureOllama(): void {
+  if (OLLAMA_HOST && !process.env.OPENAI_BASE_URL) {
+    // Ollama exposes OpenAI-compatible API at /v1
+    const ollamaUrl = OLLAMA_HOST.endsWith("/v1")
+      ? OLLAMA_HOST
+      : `${OLLAMA_HOST.replace(/\/$/, "")}/v1`;
+    process.env.OPENAI_BASE_URL = ollamaUrl;
+    console.error(`[mcp-memvid] Configured Ollama at ${ollamaUrl}`);
+  }
+}
+
+// Get effective embedding model
+function getEmbeddingModel(requested?: string): string {
+  if (requested) return requested;
+
+  // If Ollama is configured and no specific model requested, use openai-small
+  // (which will route through Ollama's OpenAI-compatible API)
+  if (OLLAMA_HOST && DEFAULT_EMBEDDING_MODEL === "bge-small") {
+    return "openai-small";
+  }
+
+  return DEFAULT_EMBEDDING_MODEL;
+}
+
+// Get embedding configuration info
+function getEmbeddingConfig(): Record<string, unknown> {
+  return {
+    defaultModel: DEFAULT_EMBEDDING_MODEL,
+    effectiveModel: getEmbeddingModel(),
+    ollamaHost: OLLAMA_HOST || null,
+    openaiBaseUrl: process.env.OPENAI_BASE_URL || null,
+    openaiKeySet: !!process.env.OPENAI_API_KEY,
+    supportedModels: {
+      local: EMBEDDING_MODELS.local,
+      openai: EMBEDDING_MODELS.openai,
+      note: "For Ollama, set OLLAMA_HOST and use 'openai-small' model",
+    },
+  };
+}
+
+// =============================================================================
+// Storage Configuration - XDG compliant
+// =============================================================================
+
 const XDG_DATA_HOME =
   process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
 const CAPSULES_DIR = join(XDG_DATA_HOME, "memvid", "capsules");
 
-// Ensure capsules directory exists
 function ensureCapsuleDir(): void {
   if (!existsSync(CAPSULES_DIR)) {
     mkdirSync(CAPSULES_DIR, { recursive: true });
   }
 }
 
-// Get capsule path from name
 function getCapsulePath(name: string): string {
   ensureCapsuleDir();
   const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -60,7 +121,6 @@ function getCapsulePath(name: string): string {
 // Cache for open capsules
 const capsuleCache = new Map<string, MemvidInstance>();
 
-// Get or create capsule instance
 async function getCapsule(
   name: string,
   createIfNotExists = true
@@ -88,7 +148,6 @@ async function getCapsule(
   }
 }
 
-// List available capsules
 function listCapsules(): string[] {
   ensureCapsuleDir();
   return readdirSync(CAPSULES_DIR)
@@ -96,27 +155,29 @@ function listCapsules(): string[] {
     .map((f) => f.replace(".mv2", ""));
 }
 
-// Normalize search results
 function normalizeResults(
   results: SearchResult[] | { hits: SearchResult[] }
 ): SearchResult[] {
   return Array.isArray(results) ? results : results.hits || [];
 }
 
-// Tool definitions
+// =============================================================================
+// Tool Definitions
+// =============================================================================
+
 const tools: Tool[] = [
   // Storage tools
   {
     name: "store_memory",
     description:
-      "Store information in a memvid capsule. Use this to save context, notes, code snippets, conversations, or any data for later retrieval. Supports tags for organization and optional vector embeddings for semantic search.",
+      "Store information in a memvid capsule with optional vector embeddings for semantic search. Supports local models (bge-small, nomic), OpenAI, or Ollama for embeddings.",
     inputSchema: {
       type: "object" as const,
       properties: {
         capsule: {
           type: "string",
           description:
-            "Name of the capsule (e.g., 'agent-context', 'knowledge-base', 'session-cache'). Created automatically if it doesn't exist.",
+            "Name of the capsule (e.g., 'agent-context', 'knowledge-base'). Created automatically if it doesn't exist.",
         },
         text: {
           type: "string",
@@ -129,20 +190,23 @@ const tools: Tool[] = [
         tags: {
           type: "array",
           items: { type: "string" },
-          description:
-            "Optional tags for categorization (e.g., ['meeting', 'project-alpha'])",
+          description: "Optional tags for categorization",
         },
         metadata: {
           type: "object",
-          description:
-            "Optional key-value metadata (e.g., {\"source\": \"slack\", \"date\": \"2024-01-15\"})",
+          description: "Optional key-value metadata",
           additionalProperties: true,
         },
         enable_embedding: {
           type: "boolean",
           description:
-            "Generate vector embedding for semantic search (requires AI provider). Default: false",
+            "Generate vector embedding for semantic search. Default: false",
           default: false,
+        },
+        embedding_model: {
+          type: "string",
+          description:
+            "Embedding model to use. Options: 'bge-small' (local, default), 'bge-base', 'nomic', 'gte-large' (local), 'openai-small', 'openai-large' (requires OPENAI_API_KEY or Ollama)",
         },
       },
       required: ["capsule", "text"],
@@ -151,7 +215,7 @@ const tools: Tool[] = [
   {
     name: "delete_capsule",
     description:
-      "Delete an entire capsule file. This permanently removes all memories in the capsule. Use with caution.",
+      "Delete an entire capsule file. This permanently removes all memories. Requires confirmation.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -172,7 +236,7 @@ const tools: Tool[] = [
   {
     name: "semantic_search",
     description:
-      "Search memories by meaning using vector embeddings. Best for finding conceptually related content even when exact words don't match. Requires embeddings to be enabled when storing.",
+      "Search memories by meaning using vector embeddings. Finds conceptually related content even when exact words don't match.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -182,12 +246,11 @@ const tools: Tool[] = [
         },
         query: {
           type: "string",
-          description:
-            "Natural language query describing what you're looking for",
+          description: "Natural language query",
         },
         limit: {
           type: "number",
-          description: "Maximum results to return (default: 10)",
+          description: "Maximum results (default: 10)",
           default: 10,
         },
       },
@@ -197,7 +260,7 @@ const tools: Tool[] = [
   {
     name: "text_search",
     description:
-      "Search memories using full-text/keyword search (BM25). Best for finding exact words, names, identifiers, or specific terms.",
+      "Search memories using full-text/keyword search (BM25). Best for exact words, names, or specific terms.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -207,11 +270,11 @@ const tools: Tool[] = [
         },
         query: {
           type: "string",
-          description: "Keywords or text to search for",
+          description: "Keywords to search for",
         },
         limit: {
           type: "number",
-          description: "Maximum results to return (default: 10)",
+          description: "Maximum results (default: 10)",
           default: 10,
         },
       },
@@ -221,7 +284,7 @@ const tools: Tool[] = [
   {
     name: "smart_search",
     description:
-      "Search using automatic mode selection - memvid decides whether to use semantic or lexical search based on the query. Good default choice when unsure which search type to use.",
+      "Search with automatic mode selection - memvid chooses semantic or lexical based on query.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -231,11 +294,11 @@ const tools: Tool[] = [
         },
         query: {
           type: "string",
-          description: "Search query (natural language or keywords)",
+          description: "Search query",
         },
         limit: {
           type: "number",
-          description: "Maximum results to return (default: 10)",
+          description: "Maximum results (default: 10)",
           default: 10,
         },
       },
@@ -244,8 +307,7 @@ const tools: Tool[] = [
   },
   {
     name: "recent_memories",
-    description:
-      "Get the most recent memories from a capsule in chronological order. Useful for retrieving recent context or reviewing what was stored.",
+    description: "Get the most recent memories from a capsule in chronological order.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -255,7 +317,7 @@ const tools: Tool[] = [
         },
         limit: {
           type: "number",
-          description: "Number of recent memories to return (default: 10)",
+          description: "Number of recent memories (default: 10)",
           default: 10,
         },
       },
@@ -266,8 +328,7 @@ const tools: Tool[] = [
   // Capsule management
   {
     name: "list_capsules",
-    description:
-      "List all available memory capsules in the storage directory.",
+    description: "List all available memory capsules.",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -276,15 +337,13 @@ const tools: Tool[] = [
   },
   {
     name: "create_capsule",
-    description:
-      "Create a new empty capsule. The capsule will be created in the XDG data directory.",
+    description: "Create a new empty capsule.",
     inputSchema: {
       type: "object" as const,
       properties: {
         name: {
           type: "string",
-          description:
-            "Name for the new capsule (alphanumeric, hyphens, underscores)",
+          description: "Name for the new capsule",
         },
       },
       required: ["name"],
@@ -292,22 +351,36 @@ const tools: Tool[] = [
   },
   {
     name: "capsule_info",
-    description:
-      "Get information about a capsule including its storage path and whether it exists.",
+    description: "Get information about a capsule including storage path.",
     inputSchema: {
       type: "object" as const,
       properties: {
         capsule: {
           type: "string",
-          description: "Name of the capsule to get info about",
+          description: "Name of the capsule",
         },
       },
       required: ["capsule"],
     },
   },
+
+  // Configuration
+  {
+    name: "embedding_config",
+    description:
+      "Get current embedding configuration including available models, Ollama status, and API key status.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
-// Format search result for output
+// =============================================================================
+// Tool Handlers
+// =============================================================================
+
 function formatResult(result: SearchResult): string {
   const title = result.title || "Untitled";
   const content = result.snippet || result.text || result.preview || "";
@@ -315,7 +388,6 @@ function formatResult(result: SearchResult): string {
   return `[${title}]\n${content}\n${score}`.trim();
 }
 
-// Tool handlers
 async function handleToolCall(
   name: string,
   args: Record<string, unknown>
@@ -325,20 +397,26 @@ async function handleToolCall(
       // Storage tools
       case "store_memory": {
         const capsule = await getCapsule(args.capsule as string);
+        const enableEmbedding = (args.enable_embedding as boolean) || false;
+        const embeddingModel = enableEmbedding
+          ? getEmbeddingModel(args.embedding_model as string | undefined)
+          : undefined;
+
         await capsule.put({
           text: args.text as string,
           title: args.title as string | undefined,
           labels: args.tags as string[] | undefined,
           metadata: args.metadata as Record<string, unknown> | undefined,
-          enableEmbedding: (args.enable_embedding as boolean) || false,
+          enableEmbedding,
+          embeddingModel,
         });
+
+        let response = `Stored memory in capsule '${args.capsule}'`;
+        if (args.title) response += ` with title '${args.title}'`;
+        if (enableEmbedding) response += ` (embedded with ${embeddingModel})`;
+
         return {
-          content: [
-            {
-              type: "text",
-              text: `Stored memory in capsule '${args.capsule}'${args.title ? ` with title '${args.title}'` : ""}`,
-            },
-          ],
+          content: [{ type: "text", text: response }],
         };
       }
 
@@ -348,7 +426,7 @@ async function handleToolCall(
             content: [
               {
                 type: "text",
-                text: "Deletion not confirmed. Set 'confirm' to true to delete the capsule.",
+                text: "Deletion not confirmed. Set 'confirm' to true to delete.",
               },
             ],
           };
@@ -356,23 +434,13 @@ async function handleToolCall(
         const path = getCapsulePath(args.capsule as string);
         if (!existsSync(path)) {
           return {
-            content: [
-              {
-                type: "text",
-                text: `Capsule '${args.capsule}' does not exist`,
-              },
-            ],
+            content: [{ type: "text", text: `Capsule '${args.capsule}' does not exist` }],
           };
         }
         capsuleCache.delete(args.capsule as string);
         unlinkSync(path);
         return {
-          content: [
-            {
-              type: "text",
-              text: `Deleted capsule '${args.capsule}'`,
-            },
-          ],
+          content: [{ type: "text", text: `Deleted capsule '${args.capsule}'` }],
         };
       }
 
@@ -388,10 +456,7 @@ async function handleToolCall(
           content: [
             {
               type: "text",
-              text:
-                hits.length > 0
-                  ? hits.map(formatResult).join("\n\n---\n\n")
-                  : "No results found",
+              text: hits.length > 0 ? hits.map(formatResult).join("\n\n---\n\n") : "No results found",
             },
           ],
         };
@@ -408,10 +473,7 @@ async function handleToolCall(
           content: [
             {
               type: "text",
-              text:
-                hits.length > 0
-                  ? hits.map(formatResult).join("\n\n---\n\n")
-                  : "No results found",
+              text: hits.length > 0 ? hits.map(formatResult).join("\n\n---\n\n") : "No results found",
             },
           ],
         };
@@ -428,10 +490,7 @@ async function handleToolCall(
           content: [
             {
               type: "text",
-              text:
-                hits.length > 0
-                  ? hits.map(formatResult).join("\n\n---\n\n")
-                  : "No results found",
+              text: hits.length > 0 ? hits.map(formatResult).join("\n\n---\n\n") : "No results found",
             },
           ],
         };
@@ -452,10 +511,7 @@ async function handleToolCall(
           content: [
             {
               type: "text",
-              text:
-                hits.length > 0
-                  ? hits.map(formatResult).join("\n\n---\n\n")
-                  : "No memories found in capsule",
+              text: hits.length > 0 ? hits.map(formatResult).join("\n\n---\n\n") : "No memories found",
             },
           ],
         };
@@ -470,8 +526,8 @@ async function handleToolCall(
               type: "text",
               text:
                 capsules.length > 0
-                  ? `Available capsules:\n${capsules.map((c) => `  - ${c}`).join("\n")}\n\nStorage directory: ${CAPSULES_DIR}`
-                  : `No capsules found.\nStorage directory: ${CAPSULES_DIR}\nUse 'store_memory' or 'create_capsule' to create one.`,
+                  ? `Available capsules:\n${capsules.map((c) => `  - ${c}`).join("\n")}\n\nStorage: ${CAPSULES_DIR}`
+                  : `No capsules found.\nStorage: ${CAPSULES_DIR}`,
             },
           ],
         };
@@ -482,22 +538,12 @@ async function handleToolCall(
         const path = getCapsulePath(name);
         if (existsSync(path)) {
           return {
-            content: [
-              {
-                type: "text",
-                text: `Capsule '${name}' already exists at ${path}`,
-              },
-            ],
+            content: [{ type: "text", text: `Capsule '${name}' already exists at ${path}` }],
           };
         }
         await getCapsule(name, true);
         return {
-          content: [
-            {
-              type: "text",
-              text: `Created capsule '${name}' at ${path}`,
-            },
-          ],
+          content: [{ type: "text", text: `Created capsule '${name}' at ${path}` }],
         };
       }
 
@@ -509,16 +555,20 @@ async function handleToolCall(
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
-                  name,
-                  path,
-                  exists,
-                  capsulesDirectory: CAPSULES_DIR,
-                },
-                null,
-                2
-              ),
+              text: JSON.stringify({ name, path, exists, capsulesDirectory: CAPSULES_DIR }, null, 2),
+            },
+          ],
+        };
+      }
+
+      // Configuration
+      case "embedding_config": {
+        const config = getEmbeddingConfig();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(config, null, 2),
             },
           ],
         };
@@ -526,29 +576,25 @@ async function handleToolCall(
 
       default:
         return {
-          content: [
-            {
-              type: "text",
-              text: `Unknown tool: ${name}`,
-            },
-          ],
+          content: [{ type: "text", text: `Unknown tool: ${name}` }],
         };
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${message}`,
-        },
-      ],
+      content: [{ type: "text", text: `Error: ${message}` }],
     };
   }
 }
 
-// Main server setup
+// =============================================================================
+// Main Server
+// =============================================================================
+
 async function main() {
+  // Configure Ollama if OLLAMA_HOST is set
+  configureOllama();
+
   const server = new Server(
     {
       name: "mcp-memvid",
@@ -561,12 +607,10 @@ async function main() {
     }
   );
 
-  // List tools handler
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return { tools };
   });
 
-  // Call tool handler
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return handleToolCall(
       request.params.name,
@@ -574,12 +618,15 @@ async function main() {
     );
   });
 
-  // Connect via stdio
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   console.error("mcp-memvid server started");
   console.error(`Capsules directory: ${CAPSULES_DIR}`);
+  console.error(`Default embedding model: ${getEmbeddingModel()}`);
+  if (OLLAMA_HOST) {
+    console.error(`Ollama configured: ${OLLAMA_HOST}`);
+  }
 }
 
 main().catch((error) => {
