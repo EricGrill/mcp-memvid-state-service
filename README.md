@@ -1,45 +1,21 @@
-# mcp-memvid
+# mcp-memvid-state-service
 
-MCP server for [memvid](https://memvid.com) - a single-file AI memory layer with vector search, full-text search, and temporal queries.
+A **single-file AI memory layer** MCP server wrapping [memvid](https://memvid.com) - providing vector search, full-text search, and temporal queries as a Redis/Qdrant alternative for AI agents.
 
-## Features
+## Key Features
+- **10 Tools** | **3 Search Modes** | **4 Local Embedding Models** | **Ollama + OpenAI Support**
 
-- **Store memories** - Save context, notes, code, conversations with tags and metadata
-- **Semantic search** - Find conceptually related content using vector embeddings
-- **Text search** - Find exact keywords using BM25 full-text search
-- **Smart search** - Auto-selects best search mode based on query
-- **Temporal queries** - Retrieve recent memories in chronological order
-- **Named capsules** - Organize memories into separate `.mv2` files
-- **Multiple embedding providers** - Local models, OpenAI, or Ollama
-- **XDG compliant** - Stores capsules in `$XDG_DATA_HOME/memvid/capsules/`
-
-## Installation
+## Quick Start
 
 ```bash
+# Install globally
 npm install -g mcp-memvid
-```
 
-Or run directly:
-```bash
+# Or run directly
 npx mcp-memvid
 ```
 
-## Usage with Claude Code
-
-Add to your Claude Code MCP configuration (`~/.claude.json`):
-
-```json
-{
-  "mcpServers": {
-    "memvid": {
-      "command": "npx",
-      "args": ["mcp-memvid"]
-    }
-  }
-}
-```
-
-### With Ollama (recommended for local embeddings)
+Add to Claude Code (`~/.claude.json`):
 
 ```json
 {
@@ -55,143 +31,77 @@ Add to your Claude Code MCP configuration (`~/.claude.json`):
 }
 ```
 
-### With OpenAI
+## Tools Overview
 
-```json
-{
-  "mcpServers": {
-    "memvid": {
-      "command": "npx",
-      "args": ["mcp-memvid"],
-      "env": {
-        "OPENAI_API_KEY": "sk-..."
-      }
-    }
-  }
-}
-```
+| Category | Tools | Description |
+|----------|-------|-------------|
+| **Storage** | `store_memory`, `delete_capsule` | Store text with embeddings, tags, metadata |
+| **Search** | `semantic_search`, `text_search`, `smart_search` | Vector, BM25, and auto-mode search |
+| **Temporal** | `recent_memories` | Chronological retrieval |
+| **Management** | `list_capsules`, `create_capsule`, `capsule_info` | Capsule lifecycle |
+| **Config** | `embedding_config` | View embedding provider status |
 
-## Embedding Models
+## Embedding Providers
 
-### Local Models (No API Key Required)
+| Provider | Config | Models |
+|----------|--------|--------|
+| **Local** (default) | None needed | `bge-small`, `bge-base`, `nomic`, `gte-large` |
+| **Ollama** | `OLLAMA_HOST=http://localhost:11434` | Routes through OpenAI-compatible API |
+| **OpenAI** | `OPENAI_API_KEY=sk-...` | `openai-small`, `openai-large` |
 
-These work out of the box on Linux/macOS:
+## Usage Examples
 
-| Model | Dimensions | Notes |
-|-------|------------|-------|
-| `bge-small` | 384 | Default, fast, good quality |
-| `bge-base` | 768 | Better quality, slower |
-| `nomic` | 768 | Good multilingual support |
-| `gte-large` | 1024 | Highest quality, slowest |
-
-### Ollama (Local, Private)
-
-1. Install [Ollama](https://ollama.ai)
-2. Pull an embedding model: `ollama pull nomic-embed-text`
-3. Set `OLLAMA_HOST=http://localhost:11434`
-4. Use `embedding_model: "openai-small"` (routes through Ollama's OpenAI-compatible API)
-
-### OpenAI (Cloud)
-
-1. Set `OPENAI_API_KEY`
-2. Use `embedding_model: "openai-small"` or `"openai-large"`
-
-## Tools
-
-### Storage
-
-| Tool | Description |
-|------|-------------|
-| `store_memory` | Store text with optional embeddings, title, tags, metadata |
-| `delete_capsule` | Delete an entire capsule (requires confirmation) |
-
-### Search
-
-| Tool | Description |
-|------|-------------|
-| `semantic_search` | Find by meaning using vector embeddings |
-| `text_search` | Find by exact keywords (BM25) |
-| `smart_search` | Auto-select best search mode |
-| `recent_memories` | Get memories in chronological order |
-
-### Capsule Management
-
-| Tool | Description |
-|------|-------------|
-| `list_capsules` | List all available capsules |
-| `create_capsule` | Create a new empty capsule |
-| `capsule_info` | Get path and status of a capsule |
-| `embedding_config` | Show current embedding configuration |
-
-## Examples
-
-### Store with local embeddings (default)
-```
-store_memory(
-  capsule: "knowledge",
-  text: "The API uses JWT tokens for authentication.",
-  title: "Auth Notes",
+```javascript
+// Store with embeddings
+store_memory({
+  capsule: "knowledge-base",
+  text: "The API uses JWT tokens with 24h expiry",
+  title: "Auth Architecture",
+  tags: ["api", "security"],
   enable_embedding: true
-)
-```
+})
 
-### Store with Ollama embeddings
-```
-store_memory(
-  capsule: "knowledge",
-  text: "PostgreSQL is our primary database.",
-  title: "DB Architecture",
-  enable_embedding: true,
-  embedding_model: "openai-small"  // routes through Ollama if OLLAMA_HOST is set
-)
-```
-
-### Semantic search
-```
-semantic_search(
-  capsule: "knowledge",
+// Semantic search
+semantic_search({
+  capsule: "knowledge-base",
   query: "how does authentication work"
-)
-```
+})
 
-### Check embedding config
-```
+// Check config
 embedding_config()
-// Returns:
-// {
-//   "defaultModel": "bge-small",
-//   "effectiveModel": "openai-small",  // if Ollama configured
-//   "ollamaHost": "http://localhost:11434",
-//   "openaiBaseUrl": "http://localhost:11434/v1",
-//   ...
-// }
 ```
 
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `OLLAMA_HOST` | Ollama server URL (e.g., `http://localhost:11434`) |
+| `OLLAMA_HOST` | Ollama server URL (enables local LLM embeddings) |
 | `OPENAI_API_KEY` | OpenAI API key for cloud embeddings |
-| `OPENAI_BASE_URL` | Custom OpenAI-compatible endpoint |
 | `MEMVID_EMBEDDING_MODEL` | Default embedding model |
-| `XDG_DATA_HOME` | Override base data directory |
+| `XDG_DATA_HOME` | Override capsule storage location |
 
-## Storage Location
+## Storage
 
-Capsules are stored in:
-- `$XDG_DATA_HOME/memvid/capsules/` (typically `~/.local/share/memvid/capsules/`)
+Capsules stored in `$XDG_DATA_HOME/memvid/capsules/` (default: `~/.local/share/memvid/capsules/`)
 
-Each capsule is a single `.mv2` file containing all data, indices, and metadata.
+Each `.mv2` capsule is a single portable file containing all data, indices, and metadata.
 
 ## Platform Support
 
-| Platform | Local Embeddings | Notes |
-|----------|-----------------|-------|
-| Linux x64 | Yes | Full support |
-| macOS ARM64 | Yes | Full support |
-| macOS x64 | Yes | Full support |
-| Windows x64 | No | Use OpenAI or Ollama |
+| Platform | Local Embeddings |
+|----------|-----------------|
+| Linux x64 | Yes |
+| macOS ARM64/x64 | Yes |
+| Windows x64 | Use Ollama or OpenAI |
+
+## Part of the Claude Code Plugin Ecosystem
+
+This MCP server is part of the [**agents-skills-plugins**](https://github.com/EricGrill/agents-skills-plugins) marketplace - a community collection of 41+ plugins extending Claude Code with specialized capabilities.
+
+```bash
+# Browse the full marketplace
+/plugin marketplace add EricGrill/agents-skills-plugins
+```
 
 ## License
 
